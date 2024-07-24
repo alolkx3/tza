@@ -1,36 +1,70 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { simpleGit } from 'simple-git';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  SupportedTextSplitterLanguages,
+  RecursiveCharacterTextSplitter
+} from 'langchain/text_splitter';
+import { OllamaEmbeddings } from "@langchain/community/embeddings/ollama";
+import { MemoryVectorStore } from "langchain/vectorstores/memory";
+import { TextLoader } from "langchain/document_loaders/fs/text";
 
-const execAsync = promisify(exec);
+interface FileWithExtension {
+  file: string;
+  extension: string;
+}
+
+const embeddings = new OllamaEmbeddings({
+  model: "llama2",
+  baseUrl: "http://localhost:11434",
+});
 
 @Injectable()
 export class InfoService {
   private readonly logger = new Logger(InfoService.name);
 
-  async getProjectInfo(repoUrl: string, question: string, topN: number = 5): Promise<Object[]> {
+  async getProjectInfo(repoUrl: string, question: string, topN: number = 10): Promise<Object[]> {
     this.logger.log(`Starting getProjectInfo with repoUrl=${repoUrl}, question=${question}, topN=${topN}`);
     const localDirectory = './local-directory';
 
-    // Очистка папки перед клонированием
     await this.clearDirectory(localDirectory);
 
     this.logger.log(`Cloning repository from ${repoUrl} to ${localDirectory}`);
     await simpleGit().clone(repoUrl, localDirectory);
 
-    this.logger.log(`Deleting .git from ${localDirectory}`);
-    await this.removeGitDirectory(localDirectory);
+    const files = await this.filredListFiles(localDirectory)
 
-    this.logger.log(`Running Python script for combiner files in ${localDirectory}`);
-    await execAsync('python ./file_combiner.py');
 
-    this.logger.log(`Running Python script for question=${question}`);
-    const result = await this.runGenerateTextScript('./output_file.txt', question);
-
-    this.logger.log(`Python script completed with result: ${result}`);
+    let docs = []
+    for (const fwe of files) {
+      this.logger.log(localDirectory + '/' + fwe.file);
+      const textLoader = new TextLoader(localDirectory + '/' + fwe.file);
+      const doc = await textLoader.load();
+      this.logger.log("doc: ");
+      this.logger.log(doc);
+      docs = docs.concat(doc);
+    }
+    this.logger.log("docs:");
+    this.logger.log(docs);
+    const textSplitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 100,
+      chunkOverlap: 0,
+    });
+    const splits = await textSplitter.splitDocuments(docs);
+    console.log(splits.length);
+    const vectorstore = await MemoryVectorStore.fromDocuments(
+      splits,
+      embeddings
+    );
+    this.logger.log(vectorstore);
+    this.logger.log('Vector similaritySearch starting');
+    const result = await vectorstore.similaritySearch(
+      question,
+      topN
+    );
+    this.logger.log(result);
+    this.logger.log('Retrieved documents successfully');
     return [{ info: result }];
   }
 
@@ -53,32 +87,28 @@ export class InfoService {
     this.logger.log(`Directory ${directoryPath} cleared`);
   }
 
-  async removeGitDirectory(directoryPath: string): Promise<void> {
-    const gitPath = path.join(directoryPath, '.git');
-    if (fs.existsSync(gitPath)) {
-      this.logger.log(`Removing .git directory at ${gitPath}`);
-      await this.clearDirectory(gitPath); // Очистка содержимого папки .git
-      fs.rmdirSync(gitPath); // Удаление папки .git
-      this.logger.log(`.git directory removed`);
-    } else {
-      this.logger.log(`.git directory not found at ${gitPath}`);
-    }
-  }
-
-  async runGenerateTextScript(directoryPath: string, question: string, topN = 10): Promise<string> {
-    const scriptPath = './generate_text.py';
-
+  async filredListFiles(repo: string): Promise<FileWithExtension[]> {
     try {
-      const { stdout, stderr } = await execAsync(`python ${scriptPath} ${directoryPath} "${question}" --top_n ${topN}`);
-      if (stderr) {
-        this.logger.error(`Python script error: ${stderr}`);
-        return `Error: ${stderr}`;
-      }
-      this.logger.log(`Python script output: ${stdout}`);
-      return stdout;
+      const git = simpleGit();
+      await git.cwd(repo);
+      const fileList = await git.raw(['ls-tree', '-r', 'HEAD', '--name-only']);
+      this.logger.log('Retrieved file list from the repository');
+      const files: string[] = fileList.trim().split('\n');
+      this.logger.log(`Total files found: ${files.length}`);
+      const filteredFiles: FileWithExtension[] = files
+        .map(file => {
+          const ext = path.extname(file).slice(1);
+          return { file, extension: ext };
+        })
+        .filter(fileObj => (SupportedTextSplitterLanguages as unknown as string[]).includes(fileObj.extension));
+
+      this.logger.log(`Filtered files: ${filteredFiles.length}`);
+      this.logger.debug(`Filtered files list: ${filteredFiles.map(f => f.file).join(', ')}`);
+
+      return filteredFiles;
     } catch (error) {
-      this.logger.error(`Execution error: ${error}`);
-      return `Execution error: ${error}`;
+      this.logger.error('Error while filtering files:', error);
+      throw error;
     }
   }
 }
