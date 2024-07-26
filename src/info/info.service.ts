@@ -24,6 +24,24 @@ const embeddings = new OllamaEmbeddings({
 export class InfoService {
   private readonly logger = new Logger(InfoService.name);
 
+  private readonly textSplitterConfig: Record<string, { lang: string, chunkSize: number, chunkOverlap: number }> = {
+    'cpp': { lang: 'cpp', chunkSize: 100, chunkOverlap: 0 },
+    'go': { lang: 'go', chunkSize: 100, chunkOverlap: 0 },
+    'java': { lang: 'java', chunkSize: 100, chunkOverlap: 0 },
+    'js': { lang: 'js', chunkSize: 100, chunkOverlap: 0 },
+    'php': { lang: 'php', chunkSize: 100, chunkOverlap: 0 },
+    'proto': { lang: 'proto', chunkSize: 100, chunkOverlap: 0 },
+    'python': { lang: 'python', chunkSize: 100, chunkOverlap: 0 },
+    'rst': { lang: 'rst', chunkSize: 100, chunkOverlap: 0 },
+    'ruby': { lang: 'ruby', chunkSize: 100, chunkOverlap: 0 },
+    'rust': { lang: 'rust', chunkSize: 100, chunkOverlap: 0 },
+    'scala': { lang: 'scala', chunkSize: 100, chunkOverlap: 0 },
+    'swift': { lang: 'swift', chunkSize: 100, chunkOverlap: 0 },
+    'markdown': { lang: 'markdown', chunkSize: 100, chunkOverlap: 0 },
+    'latex': { lang: 'latex', chunkSize: 100, chunkOverlap: 0 },
+    'html': { lang: 'html', chunkSize: 100, chunkOverlap: 0 }
+  };
+
   async getProjectInfo(repoUrl: string, question: string, topN: number = 10): Promise<Object[]> {
     this.logger.log(`Starting getProjectInfo with repoUrl=${repoUrl}, question=${question}, topN=${topN}`);
     const localDirectory = './local-directory';
@@ -33,10 +51,9 @@ export class InfoService {
     this.logger.log(`Cloning repository from ${repoUrl} to ${localDirectory}`);
     await simpleGit().clone(repoUrl, localDirectory);
 
-    const files = await this.filredListFiles(localDirectory)
+    const files = await this.filredListFiles(localDirectory);
 
-
-    let docs = []
+    let docs = [];
     for (const fwe of files) {
       this.logger.log(localDirectory + '/' + fwe.file);
       const textLoader = new TextLoader(localDirectory + '/' + fwe.file);
@@ -47,11 +64,20 @@ export class InfoService {
     }
     this.logger.log("docs:");
     this.logger.log(docs);
-    const textSplitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 100,
-      chunkOverlap: 0,
-    });
-    const splits = await textSplitter.splitDocuments(docs);
+
+    let splits = [];
+    for (const fwe of files) {
+      const config = this.textSplitterConfig[fwe.extension];
+      if (config) {
+        const textSplitter = RecursiveCharacterTextSplitter.fromLanguage(config.lang as any, {
+          chunkSize: config.chunkSize,
+          chunkOverlap: config.chunkOverlap,
+        });
+        const docSplits = await textSplitter.splitDocuments(docs);
+        splits = splits.concat(docSplits);
+      }
+    }
+
     console.log(splits.length);
     const vectorstore = await MemoryVectorStore.fromDocuments(
       splits,
@@ -100,7 +126,7 @@ export class InfoService {
           const ext = path.extname(file).slice(1);
           return { file, extension: ext };
         })
-        .filter(fileObj => (SupportedTextSplitterLanguages as unknown as string[]).includes(fileObj.extension));
+        .filter(fileObj => Object.keys(this.textSplitterConfig).includes(fileObj.extension));
 
       this.logger.log(`Filtered files: ${filteredFiles.length}`);
       this.logger.debug(`Filtered files list: ${filteredFiles.map(f => f.file).join(', ')}`);
